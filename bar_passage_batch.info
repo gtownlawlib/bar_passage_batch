@@ -1,0 +1,4 @@
+name = Bar Passage Batch Uploader
+description = Batch upload bar passers
+core = 7.x
+package = Bar Passage

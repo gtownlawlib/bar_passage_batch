@@ -1,0 +1,229 @@
+<?php
+/**
+ * Implementation of hook_permission
+ */
+function bar_passage_batch_permission() {
+  $permissions['batch import names'] = array(
+    'title' => t('Batch import names'),
+    'description' => t('Add names to the database by uploading a .csv file'),
+  );
+  return $permissions;
+}
+
+/**
+ * Implementation of hook_menu
+ */
+function bar_passage_batch_menu() {
+  $items['batch/add'] = array(
+    'title' => 'Batch Import Names',
+    'description' => 'Import Names from a <abbr title="Comma Separated Values">CSV</abbr> file.',
+    'access callback' => 'user_access',
+    'access arguments' => array('batch import names'),
+    'page callback' => 'bar_passage_batch_pagecallback',
+    'type' => MENU_NORMAL_ITEM,
+  );
+  return $items;
+}
+
+/**
+ * Page callback for hook_menu
+ */
+function bar_passage_batch_pagecallback(){
+  $module_path = drupal_get_path('module', 'bar_passage_batch');
+
+  $form = drupal_get_form('bar_passage_batch_form');
+
+  $output = '<p>Use this form to batch import all names for a particular bar exam.</p>';
+  $output .= drupal_render($form);
+
+  return $output;
+}
+
+/**
+ * Implementation of hook_form
+ */
+function bar_passage_batch_form() {
+  $states = field_info_field('field_state');
+  $form['state'] = array(
+    '#type' => 'select',
+    '#title' => t('Jurisdiction'),
+    '#description' => t('The state, territory, or other jurisdiction of the bar exam.'),
+    '#options' => list_allowed_values($states),
+    '#required' => TRUE,
+  );
+
+  $form['exam_date'] = array(
+    '#type' => 'date_select',
+    '#title' => t('Exam Date'),
+    '#description' => t('The month and year of the bar exam.'),
+    '#default_value' => date('F Y'),
+    '#date_format' => 'F Y',
+    '#date_year_range' => '-5:+0',
+    '#required' => TRUE,
+  );
+
+  $form['source'] = array(
+    '#type' => 'textfield',
+    '#title' => t('Source'),
+    '#description' => t('The source in which you found this list of names.'),
+    '#required' => TRUE,
+  );
+
+  $form['#attributes'] = array(
+    'enctype' => 'multipart/form-data'
+  );
+
+  $form['csvfile'] = array(
+    '#title' => t('CSV File of Names'),
+    '#type'  => 'file',
+    '#description' => ($max_size = parse_size(ini_get('upload_max_filesize'))) ? t('<p>A .csv file containing three columns: first name, middle name, and last name—in that order—<strong>with NO HEADER ROW</strong>.</p><p>Due to server restrictions, the <strong>maximum upload file size is !max_size</strong>. Files that exceed this size will be disregarded.</p>', array('!max_size' => format_size($max_size))) : '',
+  ) ;
+
+  $form['submit'] = array(
+    '#type' => 'submit',
+    '#value' => t('Import Names'),
+  ) ;
+
+  $form['#validate'] = array(
+    'bar_passage_batch_validate_fileupload',
+    'bar_passage_batch_form_validate',
+  ) ;
+  return $form ;
+}
+
+
+function bar_passage_batch_validate_fileupload(&$form, &$form_state) {
+  $validators = array(
+    'file_validate_extensions' => array( 'csv' ),
+  );
+
+  if ($file = file_save_upload('csvfile', $validators, "public://", FILE_EXISTS_REPLACE)) {
+    $form_state['values']['csvupload'] = $file->destination;
+  }
+  else {
+    form_set_error('bar_passage_batch', t('Unable to copy upload file to !dest', array('!dest' => $destination)));
+  }
+}
+
+
+function bar_passage_batch_form_validate(&$form, &$form_state) {
+  if (isset( $form_state['values']['csvupload'])) {
+    if ($handle = fopen($form_state['values']['csvupload'], 'r')) {
+      if ($line = fgetcsv($handle, 4096)) {
+        //  This is where you can validate aspects of the file itself, like the number of columns
+        if(count($line) != 3){
+          form_set_error('csvfile', t('This file has the incorrect number of columns. Expecting 3'));
+        }
+      }
+      fclose($handle);
+    }
+    else {
+      form_set_error('csvfile', t('Unable to read uploaded file !filepath', array('!filepath' => $form_state['values']['csvupload'])));
+    }
+  }
+}
+
+function bar_passage_batch_form_submit(&$form, &$form_state) {
+  $state = $form_state['values']['state'];
+  $date = $form_state['values']['exam_date'].'-01 00:00:00';
+  $source = $form_state['values']['source'];
+  $batch = array(
+    'title' => t('Importing Names from CSV ...'),
+    'operations' => array(),
+    'init_message' => t('Import is starting'),
+    'progress_message' => t('Imported @current of @total'),
+    'error_message' => t('An error occurred during the import'),
+    'finished' => 'bar_passage_batch_import_finished',
+  );
+  if (isset( $form_state['values']['csvupload'])) {
+    if ($handle = fopen($form_state['values']['csvupload'], 'r')) {
+      $batch['operations'][] = array('_bar_passage_batch_remember_filename', array( $form_state['values']['csvupload'] ) ) ;
+      while ($line = fgetcsv($handle, 4096)) {
+        // We use base64_encode to ensure we don't overload the batch
+        // processor by stuffing complex objects into it
+        $batch['operations'][] = array('_bar_passage_batch_import_line', array(array_map('base64_encode', $line), $state, $date, $source));
+      }
+      fclose($handle);
+    }
+  }
+  batch_set($batch);
+}
+
+function bar_passage_batch_import_finished($success, $results, $operations) {
+  if (!empty($results['failed_rows'])) {
+    $dir  = file_directory_path() . '/bar_passage_batch/' ;
+    if (file_check_directory( $dir, FILE_CREATE_DIRECTORY)) {
+      $csv_filename = 'failed_rows-'. basename($results['uploaded_filename']); // we validated extension on upload
+      $csv_filepath = $dir .'/'. $csv_filename;
+      $targs = array(
+        '!csv_url' => l(check_plain($csv_filename), $csv_filepath),
+        '%csv_filename' => $csv_filename,
+        '%csv_filepath' => $csv_filepath,
+      );
+      if ($handle = fopen($csv_filepath, 'w+')) {
+        foreach($results['failed_rows'] as $failed_row) {
+          fputcsv($handle, $failed_row);
+        }
+        fclose($handle);
+        drupal_set_message(t('Some rows failed to import. You may download a CSV of these rows: !csv_url', $targs), 'error');
+      }
+      else {
+        drupal_set_message(t('Some rows failed to import, but unable to write error CSV to %csv_filepath', $targs), 'error');
+      }
+    }
+    else {
+      drupal_set_message(t('Some rows failed to import, but unable to create directory for error CSV at %csv_directory', $targs), 'error');
+    }
+  }
+  return t('The CSV import has completed.');
+}
+
+
+function _bar_passage_batch_remember_filename($filename, &$context) {
+  $context['results']['uploaded_filename'] = $filename;
+}
+
+function _bar_passage_batch_import_line($line, $state, $date, $source, &$context) {
+  if (!isset($context['results']['rows_imported'])) {
+    $context['results']['rows_imported'] = 0;
+  };
+  $context['results']['rows_imported']++;
+  $line = $cleaned_line = array_map('base64_decode', $line);
+
+  // Show the row count by default
+  $context['message'] = t('Importing row !c', array( '!c' => $context['results']['rows_imported'] ));
+
+  // Or, Provide some feedback about the row currently being processed
+  $context['message'] = t('Importing %title', array('%title' => $line[0]));
+
+  // Convert the line of the CSV file into a new node
+  if (trim($line[0]) != '' && trim($line[2]) != '') {
+    global $user;
+    $node = new stdClass();
+    $node->type = "person";
+    node_object_prepare($node);
+    $node->language = LANGUAGE_NONE;
+    $node->uid = $user->uid;
+    $node->status = 1;
+    $node->promote = 0;
+    $node->field_first_name['und'][0]['value'] = trim($line[0]);
+    if (trim($line[1]) != '') {
+      $node->field_middle_name['und'][0]['value'] = trim($line[1]);
+    }
+    $node->field_last_name['und'][0]['value'] = trim($line[2]);
+    $node->field_exam_date['und'][0]['value'] = $date;
+    $node->field_source['und'][0]['value'] = $source;
+    $node->field_state['und'][0]['value'] = $state;
+    $node = node_submit($node);
+    node_save($node);
+    drupal_set_message("Imported {$line[2]}, {$line[0]} {$line[1]}");
+  }
+  else {
+    drupal_set_message("Could not parse {$line[2]}, {$line[0]} {$line[1]}. Name not imported.");
+  }
+
+  // Capture and report on failed lines
+  if ($line[1] == 'ROW' && $line[2] == 'FAILS') {
+    $context['results']['failed_rows'][] = $line ;
+  }
+}
