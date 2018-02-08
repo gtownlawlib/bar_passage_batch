@@ -111,8 +111,8 @@ function bar_passage_batch_form_validate(&$form, &$form_state) {
     if ($handle = fopen($form_state['values']['csvupload'], 'r')) {
       if ($line = fgetcsv($handle, 4096)) {
         //  This is where you can validate aspects of the file itself, like the number of columns
-        if(count($line) != 3){
-          form_set_error('csvfile', t('This file has the incorrect number of columns. Expecting 3'));
+        if(count($line) < 3){
+          form_set_error('csvfile', t('This file has the incorrect number of columns. Expecting 3 or 4.'));
         }
       }
       fclose($handle);
@@ -206,17 +206,28 @@ function _bar_passage_batch_import_line($line, $state, $date, $source, &$context
     $node->uid = $user->uid;
     $node->status = 1;
     $node->promote = 0;
-    $node->field_first_name['und'][0]['value'] = trim($line[0]);
-    if (trim($line[1]) != '') {
-      $node->field_middle_name['und'][0]['value'] = trim($line[1]);
+    $first = trim($line[0]);
+    $first = trim($first, chr(0xC2).chr(0xA0));
+    $node->field_first_name['und'][0]['value'] = $first;
+    $middle = trim($line[1]);
+    $middle = trim($middle, chr(0xC2).chr(0xA0));
+    if ($middle != '') {
+      $node->field_middle_name['und'][0]['value'] = $middle;
     }
-    $node->field_last_name['und'][0]['value'] = trim($line[2]);
+    $last = trim($line[2]);
+    $last = trim($last, chr(0xC2).chr(0xA0));
+    $node->field_last_name['und'][0]['value'] = $last;
+    $suffix = trim($line[3]);
+    $suffix = trim($suffix, chr(0xC2).chr(0xA0));
+    if ($suffix != '') {
+      $node->field_suffix['und'][0]['value'] = $suffix;
+    }
     $node->field_exam_date['und'][0]['value'] = $date;
     $node->field_source['und'][0]['value'] = $source;
     $node->field_state['und'][0]['value'] = $state;
     $node = node_submit($node);
     node_save($node);
-    drupal_set_message("Imported {$line[2]}, {$line[0]} {$line[1]}");
+    drupal_set_message("Imported {$last}, {$first} {$middle}");
   }
   else {
     drupal_set_message("Could not parse {$line[2]}, {$line[0]} {$line[1]}. Name not imported.");
